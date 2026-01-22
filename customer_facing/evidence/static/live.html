@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>VeloDB Analytics - Live Dashboard</title>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+        iframe { width: 100%; height: 100%; border: none; }
+    </style>
+</head>
+<body>
+    <iframe id="dashboard" src="/"></iframe>
+    <script>
+        setInterval(function() {
+            document.getElementById('dashboard').src = '/?t=' + Date.now();
+        }, 5000);
+    </script>
+</body>
+</html>

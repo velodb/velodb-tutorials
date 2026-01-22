@@ -1,0 +1,52 @@
+FROM apache/superset:3.1.0
+
+USER root
+
+# Install MySQL client and supervisor
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    supervisor \
+    default-mysql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install MySQL driver for Superset
+RUN pip install mysqlclient
+
+# Create app directory
+WORKDIR /app
+
+# Copy configuration
+COPY superset/superset_config.py /app/superset_config.py
+ENV SUPERSET_CONFIG_PATH=/app/superset_config.py
+
+# Copy setup scripts
+COPY superset/setup_dashboard.py /app/setup_dashboard.py
+COPY superset/setup_via_orm.py /app/setup_via_orm.py
+COPY superset/init_superset.sh /app/init_superset.sh
+RUN chmod +x /app/init_superset.sh
+
+# Copy datagen and historical data seeder
+COPY datagen/ /app/datagen/
+COPY datagen/seed_history.py /app/seed_history.py
+RUN pip install mysql-connector-python
+
+# Copy supervisord config
+COPY supervisord.superset.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Copy entrypoint
+COPY start_superset.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+# Environment variables
+ENV VELODB_HOST=localhost \
+    VELODB_PORT=9030 \
+    VELODB_USER=root \
+    VELODB_PASSWORD="" \
+    VELODB_DATABASE=user_analytics \
+    SUPERSET_ADMIN_USER=admin \
+    SUPERSET_ADMIN_PASSWORD=admin \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8088
+
+ENTRYPOINT ["/app/start.sh"]

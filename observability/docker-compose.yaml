@@ -1,0 +1,758 @@
+# VeloDB Observability Quickstart
+#
+# QUICK START:
+#   1. Download docker-compose.yaml (single file - dashboards pre-packaged in image)
+#   2. Create .env file with your VeloDB credentials
+#   3. Create database: mysql -h YOUR_HOST -P 9030 -u YOUR_USER -p -e "CREATE DATABASE observability"
+#   4. docker compose --profile demo up -d
+#   5. Open http://localhost:3000 for Grafana, http://localhost:8080 for demo store
+#
+
+x-logging: &logging
+  driver: "json-file"
+  options:
+    max-size: "5m"
+    max-file: "2"
+
+networks:
+  velodb-otel:
+    driver: bridge
+
+configs:
+  otelcol-config:
+    content: |
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+            http:
+              endpoint: 0.0.0.0:4318
+              cors:
+                allowed_origins: ["http://*", "https://*"]
+
+      processors:
+        batch:
+          send_batch_size: 10000
+          timeout: 10s
+        memory_limiter:
+          check_interval: 5s
+          limit_percentage: 80
+          spike_limit_percentage: 25
+        # Filter out currency service logs (C++ SDK has timestamp bug)
+        filter/currency_logs:
+          error_mode: ignore
+          logs:
+            log_record:
+              - 'resource.attributes["service.name"] == "currency"'
+
+      exporters:
+        doris/velodb:
+          endpoint: http://${VELODB_HOST}:${VELODB_HTTP_PORT}
+          database: ${VELODB_DATABASE}
+          username: ${VELODB_USER}
+          password: ${VELODB_PASSWORD}
+          table:
+            logs: otel_logs
+            traces: otel_traces
+            metrics: otel_metrics
+          create_schema: true
+          mysql_endpoint: ${VELODB_HOST}:${VELODB_MYSQL_PORT}
+          history_days: ${DATA_RETENTION_DAYS}
+          create_history_days: ${DATA_RETENTION_DAYS}
+          replication_num: ${REPLICATION_NUM}
+          timezone: ${VELODB_TIMEZONE}
+          timeout: 60s
+          sending_queue:
+            enabled: true
+            num_consumers: 10
+            queue_size: 1000
+          retry_on_failure:
+            enabled: true
+            initial_interval: 5s
+            max_interval: 30s
+
+      extensions:
+        health_check:
+          endpoint: 0.0.0.0:13133
+
+      service:
+        extensions: [health_check]
+        pipelines:
+          traces:
+            receivers: [otlp]
+            processors: [memory_limiter, batch]
+            exporters: [doris/velodb]
+          metrics:
+            receivers: [otlp]
+            processors: [memory_limiter, batch]
+            exporters: [doris/velodb]
+          logs:
+            receivers: [otlp]
+            processors: [memory_limiter, filter/currency_logs, batch]
+            exporters: [doris/velodb]
+
+  flagd-config:
+    content: |
+      {"flags":{"productCatalogFailure":{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"},"recommendationServiceCacheFailure":{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"},"adServiceManualGc":{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"},"adServiceHighCpu":{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"},"cartServiceFailure":{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"},"paymentServiceFailure":{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"},"paymentServiceUnreachable":{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"},"loadgeneratorFloodHomepage":{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"},"kafkaQueueProblems":{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"},"imageSlowLoad":{"state":"ENABLED","variants":{"on":true,"off":false},"defaultVariant":"off"}}}
+
+  products-config:
+    content: |
+      {"products":[{"id":"OLJCESPC7Z","name":"National Park Foundation Explorascope","description":"The National Park Foundation's (NPF) Explorascope 60AZ is a manual alt-azimuth, refractor telescope perfect for celestial viewing on the go.","picture":"NationalParkFoundationExplorascope.jpg","priceUsd":{"currencyCode":"USD","units":101,"nanos":960000000},"categories":["telescopes"]},{"id":"66VCHSJNUP","name":"Starsense Explorer Refractor Telescope","description":"The first telescope that uses your smartphone to analyze the night sky and calculate its position in real time.","picture":"StarsenseExplorer.jpg","priceUsd":{"currencyCode":"USD","units":349,"nanos":950000000},"categories":["telescopes"]},{"id":"1YMWWN1N4O","name":"Eclipsmart Travel Refractor Telescope","description":"Dedicated white-light solar scope for the observer on the go.","picture":"EclipsmartTravelRefractorTelescope.jpg","priceUsd":{"currencyCode":"USD","units":129,"nanos":950000000},"categories":["telescopes","travel"]},{"id":"L9ECAV7KIM","name":"Lens Cleaning Kit","description":"Wipe away dust, dirt, fingerprints on your lenses.","picture":"LensCleaningKit.jpg","priceUsd":{"currencyCode":"USD","units":21,"nanos":950000000},"categories":["accessories"]},{"id":"2ZYFJ3GM2N","name":"Roof Binoculars","description":"High-quality ED glass binoculars for all-around use.","picture":"RoofBinoculars.jpg","priceUsd":{"currencyCode":"USD","units":209,"nanos":950000000},"categories":["binoculars"]},{"id":"0PUK6V6EV0","name":"Solar System Color Imager","description":"Dedicated planetary imaging camera.","picture":"SolarSystemColorImager.jpg","priceUsd":{"currencyCode":"USD","units":175,"nanos":0},"categories":["accessories","cameras"]},{"id":"LS4PSXUNUM","name":"Red Flashlight","description":"Multi-function red flashlight for astronomy.","picture":"RedFlashlight.jpg","priceUsd":{"currencyCode":"USD","units":57,"nanos":80000000},"categories":["accessories"]},{"id":"9SIQT8TOJO","name":"Optical Tube Assembly","description":"RASA V2 astrograph for deep-sky imaging.","picture":"OpticalTubeAssembly.jpg","priceUsd":{"currencyCode":"USD","units":3599,"nanos":0},"categories":["assembly","telescopes"]},{"id":"6E92ZMYYFZ","name":"Solar Filter","description":"Solar observation filter for 8-inch telescopes.","picture":"SolarFilter.jpg","priceUsd":{"currencyCode":"USD","units":69,"nanos":950000000},"categories":["accessories"]},{"id":"HQTGWGPNH4","name":"The Comet Book","description":"A 16th-century treatise on comets.","picture":"TheCometBook.jpg","priceUsd":{"currencyCode":"USD","units":0,"nanos":990000000},"categories":["books"]}]}
+
+  envoy-config:
+    content: |
+      static_resources:
+        listeners:
+          - address:
+              socket_address:
+                address: 0.0.0.0
+                port_value: 8080
+            filter_chains:
+              - filters:
+                  - name: envoy.filters.network.http_connection_manager
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                      codec_type: AUTO
+                      stat_prefix: ingress_http
+                      tracing:
+                        spawn_upstream_span: true
+                        random_sampling:
+                          value: 100
+                        provider:
+                          name: envoy.tracers.opentelemetry
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                            grpc_service:
+                              envoy_grpc:
+                                cluster_name: opentelemetry_collector_grpc
+                              timeout: 0.250s
+                            service_name: frontend-proxy
+                            resource_detectors:
+                              - name: envoy.tracers.opentelemetry.resource_detectors.environment
+                                typed_config:
+                                  "@type": type.googleapis.com/envoy.extensions.tracers.opentelemetry.resource_detectors.v3.EnvironmentResourceDetectorConfig
+                      route_config:
+                        name: local_route
+                        virtual_hosts:
+                          - name: frontend
+                            domains:
+                              - "*"
+                            routes:
+                              - match: { prefix: "/loadgen" }
+                                route: { cluster: loadgen, prefix_rewrite: "/" }
+                              - match: { prefix: "/otlp-http/" }
+                                route: { cluster: opentelemetry_collector_http, prefix_rewrite: "/" }
+                              - match: { prefix: "/jaeger" }
+                                route: { cluster: jaeger }
+                              - match: { prefix: "/grafana" }
+                                route: { cluster: grafana }
+                              - match: { prefix: "/images/" }
+                                route: { cluster: image-provider, prefix_rewrite: "/" }
+                              - match: { prefix: "/flagservice/" }
+                                route: { cluster: flagservice, prefix_rewrite: "/", timeout: 0s }
+                              - match: { prefix: "/feature" }
+                                route: { cluster: flagd-ui }
+                              - match: { prefix: "/" }
+                                route: { cluster: frontend }
+                      http_filters:
+                        - name: envoy.filters.http.fault
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.extensions.filters.http.fault.v3.HTTPFault
+                            max_active_faults: 100
+                            delay:
+                              header_delay: {}
+                              percentage:
+                                numerator: 100
+                        - name: envoy.filters.http.router
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                      access_log:
+                        - name: envoy.access_loggers.open_telemetry
+                          typed_config:
+                            "@type": "type.googleapis.com/envoy.extensions.access_loggers.open_telemetry.v3.OpenTelemetryAccessLogConfig"
+                            common_config:
+                              log_name: "otel_envoy_access_log"
+                              grpc_service:
+                                envoy_grpc:
+                                  cluster_name: opentelemetry_collector_grpc
+                              transport_api_version: "V3"
+                            body:
+                              string_value: "[%START_TIME%] \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %RESPONSE_FLAGS% %RESPONSE_CODE_DETAILS% %CONNECTION_TERMINATION_DETAILS% \"%UPSTREAM_TRANSPORT_FAILURE_REASON%\" %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% \"%REQ(X-FORWARDED-FOR)%\" \"%REQ(USER-AGENT)%\" \"%REQ(X-REQUEST-ID)%\" \"%REQ(:AUTHORITY)%\" \"%UPSTREAM_HOST%\" %UPSTREAM_CLUSTER% %UPSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_REMOTE_ADDRESS% %REQUESTED_SERVER_NAME% %ROUTE_NAME%\n"
+                            resource_attributes:
+                              values:
+                                - key: "service.name"
+                                  value:
+                                    string_value: frontend-proxy
+                            attributes:
+                              values:
+                                - key: "destination.address"
+                                  value:
+                                    string_value: "%UPSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%"
+                                - key: "event.name"
+                                  value:
+                                    string_value: "proxy.access"
+                                - key: "server.address"
+                                  value:
+                                    string_value: "%DOWNSTREAM_LOCAL_ADDRESS%"
+                                - key: "source.address"
+                                  value:
+                                    string_value: "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%"
+                                - key: "upstream.cluster"
+                                  value:
+                                    string_value: "%UPSTREAM_CLUSTER%"
+                                - key: "upstream.host"
+                                  value:
+                                    string_value: "%UPSTREAM_HOST%"
+                                - key: "user_agent.original"
+                                  value:
+                                    string_value: "%REQ(USER-AGENT)%"
+                                - key: "url.full"
+                                  value:
+                                    string_value: "%REQ(:SCHEME)%://%REQ(:AUTHORITY)%%REQ(:PATH)%"
+                                - key: "url.path"
+                                  value:
+                                    string_value: "%REQ(:PATH)%"
+                                - key: "url.query"
+                                  value:
+                                    string_value: "%REQ(:QUERY)%"
+                                - key: "url.template"
+                                  value:
+                                    string_value: "%ROUTE_NAME%"
+        clusters:
+          - name: opentelemetry_collector_grpc
+            type: STRICT_DNS
+            lb_policy: ROUND_ROBIN
+            typed_extension_protocol_options:
+              envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+                "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+                explicit_http_config:
+                  http2_protocol_options: {}
+            load_assignment:
+              cluster_name: opentelemetry_collector_grpc
+              endpoints:
+                - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: otel-collector
+                            port_value: 4317
+          - name: opentelemetry_collector_http
+            type: STRICT_DNS
+            lb_policy: ROUND_ROBIN
+            load_assignment:
+              cluster_name: opentelemetry_collector_http
+              endpoints:
+                - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: otel-collector
+                            port_value: 4318
+          - name: frontend
+            type: STRICT_DNS
+            lb_policy: ROUND_ROBIN
+            load_assignment:
+              cluster_name: frontend
+              endpoints:
+                - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: demo-frontend
+                            port_value: 8080
+          - name: image-provider
+            type: STRICT_DNS
+            lb_policy: ROUND_ROBIN
+            load_assignment:
+              cluster_name: image-provider
+              endpoints:
+                - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: demo-frontend
+                            port_value: 8080
+          - name: flagservice
+            type: STRICT_DNS
+            lb_policy: ROUND_ROBIN
+            load_assignment:
+              cluster_name: flagservice
+              endpoints:
+                - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: demo-flagd
+                            port_value: 8013
+          - name: flagd-ui
+            type: STRICT_DNS
+            lb_policy: ROUND_ROBIN
+            load_assignment:
+              cluster_name: flagd-ui
+              endpoints:
+                - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: demo-flagd
+                            port_value: 8013
+          - name: loadgen
+            type: STRICT_DNS
+            lb_policy: ROUND_ROBIN
+            load_assignment:
+              cluster_name: loadgen
+              endpoints:
+                - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: demo-loadgen
+                            port_value: 8089
+          - name: grafana
+            type: STRICT_DNS
+            lb_policy: ROUND_ROBIN
+            load_assignment:
+              cluster_name: grafana
+              endpoints:
+                - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: grafana
+                            port_value: 3000
+          - name: jaeger
+            type: STRICT_DNS
+            lb_policy: ROUND_ROBIN
+            load_assignment:
+              cluster_name: jaeger
+              endpoints:
+                - lb_endpoints:
+                    - endpoint:
+                        address:
+                          socket_address:
+                            address: otel-collector
+                            port_value: 4317
+      admin:
+        address:
+          socket_address:
+            address: 0.0.0.0
+            port_value: 10000
+      layered_runtime:
+        layers:
+          - name: static_layer_0
+            static_layer:
+              envoy:
+                resource_limits:
+                  listener:
+                    example_listener_name:
+                      connection_limit: 10000
+
+services:
+  # ============================================
+  # OTEL COLLECTOR - Exports to VeloDB
+  # ============================================
+  otel-collector:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.141.0
+    container_name: otel-collector
+    command: ["--config=/etc/otelcol-config.yaml"]
+    configs:
+      - source: otelcol-config
+        target: /etc/otelcol-config.yaml
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "13133:13133" # Health check
+    environment:
+      - VELODB_HOST=${VELODB_HOST}
+      - VELODB_USER=${VELODB_USER}
+      - VELODB_PASSWORD=${VELODB_PASSWORD}
+      - VELODB_DATABASE=${VELODB_DATABASE}
+      - VELODB_TIMEZONE=${VELODB_TIMEZONE:-America/Los_Angeles}
+      - VELODB_HTTP_PORT=${VELODB_HTTP_PORT:-8080}
+      - VELODB_MYSQL_PORT=${VELODB_MYSQL_PORT:-9030}
+      - DATA_RETENTION_DAYS=${DATA_RETENTION_DAYS:-7}
+      - REPLICATION_NUM=${REPLICATION_NUM:-1}
+    networks:
+      - velodb-otel
+    restart: unless-stopped
+    logging: *logging
+
+  # ============================================
+  # GRAFANA - Pre-configured with Doris App
+  # Includes dashboards and plugin - no downloads needed
+  # ============================================
+  grafana:
+    image: velodb/velodb-grafana-otel:1.1
+    container_name: grafana
+    environment:
+      - VELODB_HOST=${VELODB_HOST}
+      - VELODB_PORT=${VELODB_MYSQL_PORT:-9030}
+      - VELODB_USER=${VELODB_USER}
+      - VELODB_PASSWORD=${VELODB_PASSWORD}
+      - VELODB_DATABASE=${VELODB_DATABASE}
+      - VELODB_TIMEZONE=${VELODB_TIMEZONE:-America/Los_Angeles}
+    ports:
+      - "3000:3000"
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+    logging: *logging
+
+  # ============================================
+  # DEMO MICROSERVICES (Optional)
+  # Start with: docker compose --profile demo up -d
+  # ============================================
+  demo-frontend:
+    image: ghcr.io/open-telemetry/demo:2.0.2-frontend
+    container_name: demo-frontend
+    profiles: ["demo"]
+    environment:
+      - PORT=8080
+      - AD_ADDR=demo-ad:9555
+      - CART_ADDR=demo-cart:7070
+      - CHECKOUT_ADDR=demo-checkout:5050
+      - CURRENCY_ADDR=demo-currency:7001
+      - PRODUCT_CATALOG_ADDR=demo-product-catalog:3550
+      - RECOMMENDATION_ADDR=demo-recommendation:9001
+      - SHIPPING_ADDR=demo-shipping:50050
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=frontend
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_LOGS_EXPORTER=otlp
+      - OTEL_COLLECTOR_HOST=otel-collector
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=frontend,service.namespace=opentelemetry-demo
+      # Browser-side tracing - goes through frontend-proxy to otel-collector
+      - PUBLIC_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:8080/otlp-http/v1/traces
+      - WEB_OTEL_SERVICE_NAME=frontend-web
+      # Feature flags
+      - FLAGD_HOST=demo-flagd
+      - FLAGD_PORT=8013
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+    logging: *logging
+
+  demo-frontend-proxy:
+    image: ghcr.io/open-telemetry/demo:2.0.2-frontend-proxy
+    container_name: demo-frontend-proxy
+    profiles: ["demo"]
+    ports:
+      - "8080:8080"
+    configs:
+      - source: envoy-config
+        target: /home/envoy/envoy.tmpl.yaml
+    environment:
+      - ENVOY_PORT=8080
+      - FRONTEND_PORT=8080
+      - FRONTEND_HOST=demo-frontend
+      - LOCUST_WEB_HOST=demo-loadgen
+      - LOCUST_WEB_PORT=8089
+      - GRAFANA_PORT=3000
+      - GRAFANA_HOST=grafana
+      - FLAGD_HOST=demo-flagd
+      - FLAGD_PORT=8013
+      - FLAGD_UI_HOST=demo-flagd
+      - FLAGD_UI_PORT=8013
+      - IMAGE_PROVIDER_HOST=demo-frontend
+      - IMAGE_PROVIDER_PORT=8080
+      - OTEL_COLLECTOR_HOST=otel-collector
+      - OTEL_COLLECTOR_PORT_GRPC=4317
+      - OTEL_COLLECTOR_PORT_HTTP=4318
+      - OTEL_SERVICE_NAME=frontend-proxy
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=frontend-proxy,service.namespace=opentelemetry-demo
+      - JAEGER_HOST=otel-collector
+      - JAEGER_PORT=4317
+    networks:
+      - velodb-otel
+    depends_on:
+      - demo-frontend
+      - demo-loadgen
+      - grafana
+    restart: unless-stopped
+    logging: *logging
+
+  demo-cart:
+    image: ghcr.io/open-telemetry/demo:2.0.2-cart
+    container_name: demo-cart
+    profiles: ["demo"]
+    environment:
+      - CART_PORT=7070
+      - ASPNETCORE_URLS=http://*:7070
+      - VALKEY_ADDR=demo-valkey:6379
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=cart
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_LOGS_EXPORTER=otlp
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+      - demo-valkey
+    restart: unless-stopped
+    logging: *logging
+
+  demo-checkout:
+    image: ghcr.io/open-telemetry/demo:2.0.2-checkout
+    container_name: demo-checkout
+    profiles: ["demo"]
+    environment:
+      - CHECKOUT_PORT=5050
+      - CART_ADDR=demo-cart:7070
+      - CURRENCY_ADDR=demo-currency:7001
+      - EMAIL_ADDR=demo-email:6060
+      - PAYMENT_ADDR=demo-payment:50051
+      - PRODUCT_CATALOG_ADDR=demo-product-catalog:3550
+      - SHIPPING_ADDR=demo-shipping:50050
+      - KAFKA_ADDR=demo-kafka:9092
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=checkout
+      - OTEL_LOGS_EXPORTER=otlp
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+      - demo-cart
+      - demo-currency
+      - demo-email
+      - demo-payment
+      - demo-product-catalog
+      - demo-shipping
+      - demo-kafka
+    restart: unless-stopped
+    logging: *logging
+
+  demo-currency:
+    image: ghcr.io/open-telemetry/demo:2.0.2-currency
+    container_name: demo-currency
+    profiles: ["demo"]
+    environment:
+      - CURRENCY_PORT=7001
+      - VERSION=2.0.2
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=opentelemetry-demo,service.name=currency
+      # Disable logs - C++ SDK has bug sending timestamp=0
+      - OTEL_LOGS_EXPORTER=none
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+    logging: *logging
+
+  demo-email:
+    image: ghcr.io/open-telemetry/demo:2.0.2-email
+    container_name: demo-email
+    profiles: ["demo"]
+    environment:
+      - APP_ENV=production
+      - EMAIL_PORT=6060
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_SERVICE_NAME=email
+      - OTEL_LOGS_EXPORTER=otlp
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+    logging: *logging
+
+  demo-payment:
+    image: ghcr.io/open-telemetry/demo:2.0.2-payment
+    container_name: demo-payment
+    profiles: ["demo"]
+    environment:
+      - PAYMENT_PORT=50051
+      - FLAGD_HOST=demo-flagd
+      - FLAGD_PORT=8013
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=payment
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_LOGS_EXPORTER=otlp
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+      - demo-flagd
+    restart: unless-stopped
+    logging: *logging
+
+  demo-product-catalog:
+    image: ghcr.io/open-telemetry/demo:2.0.2-product-catalog
+    container_name: demo-product-catalog
+    profiles: ["demo"]
+    environment:
+      - PRODUCT_CATALOG_PORT=3550
+      - FLAGD_HOST=demo-flagd
+      - FLAGD_PORT=8013
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=product-catalog
+      - OTEL_LOGS_EXPORTER=otlp
+    configs:
+      - source: products-config
+        target: /usr/src/app/products/products.json
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+      - demo-flagd
+    restart: unless-stopped
+    logging: *logging
+
+  demo-recommendation:
+    image: ghcr.io/open-telemetry/demo:2.0.2-recommendation
+    container_name: demo-recommendation
+    profiles: ["demo"]
+    environment:
+      - RECOMMENDATION_PORT=9001
+      - PRODUCT_CATALOG_ADDR=demo-product-catalog:3550
+      - FLAGD_HOST=demo-flagd
+      - FLAGD_PORT=8013
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_PYTHON_LOG_CORRELATION=true
+      - OTEL_SERVICE_NAME=recommendation
+      - OTEL_LOGS_EXPORTER=otlp
+      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+      - demo-product-catalog
+      - demo-flagd
+    restart: unless-stopped
+    logging: *logging
+
+  demo-shipping:
+    image: ghcr.io/open-telemetry/demo:2.0.2-shipping
+    container_name: demo-shipping
+    profiles: ["demo"]
+    environment:
+      - SHIPPING_PORT=50050
+      - QUOTE_ADDR=demo-quote:8090
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=shipping
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_LOGS_EXPORTER=otlp
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+      - demo-quote
+    restart: unless-stopped
+    logging: *logging
+
+  demo-quote:
+    image: ghcr.io/open-telemetry/demo:2.0.2-quote
+    container_name: demo-quote
+    profiles: ["demo"]
+    environment:
+      - QUOTE_PORT=8090
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_PHP_AUTOLOAD_ENABLED=true
+      - OTEL_SERVICE_NAME=quote
+      - OTEL_LOGS_EXPORTER=otlp
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+    logging: *logging
+
+  demo-ad:
+    image: ghcr.io/open-telemetry/demo:2.0.2-ad
+    container_name: demo-ad
+    profiles: ["demo"]
+    environment:
+      - AD_PORT=9555
+      - FLAGD_HOST=demo-flagd
+      - FLAGD_PORT=8013
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_SERVICE_NAME=ad
+      - OTEL_LOGS_EXPORTER=otlp
+    networks:
+      - velodb-otel
+    depends_on:
+      - otel-collector
+      - demo-flagd
+    restart: unless-stopped
+    logging: *logging
+
+  demo-loadgen:
+    image: ghcr.io/open-telemetry/demo:2.0.2-load-generator
+    container_name: demo-loadgen
+    profiles: ["demo"]
+    environment:
+      - LOCUST_WEB_PORT=8089
+      - LOCUST_USERS=10
+      - LOCUST_HOST=http://demo-frontend-proxy:8080
+      - LOCUST_HEADLESS=false
+      - LOCUST_AUTOSTART=true
+      - LOCUST_BROWSER_TRAFFIC_ENABLED=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_SERVICE_NAME=load-generator
+      - OTEL_LOGS_EXPORTER=otlp
+      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+      - LOCUST_WEB_HOST=0.0.0.0
+      - FLAGD_HOST=demo-flagd
+      - FLAGD_OFREP_PORT=8016
+    networks:
+      - velodb-otel
+    depends_on:
+      - demo-frontend
+    restart: unless-stopped
+    logging: *logging
+
+  # Supporting services
+  demo-valkey:
+    image: valkey/valkey:8.1-alpine
+    container_name: demo-valkey
+    profiles: ["demo"]
+    networks:
+      - velodb-otel
+    restart: unless-stopped
+    logging: *logging
+
+  demo-kafka:
+    image: ghcr.io/open-telemetry/demo:2.0.2-kafka
+    container_name: demo-kafka
+    profiles: ["demo"]
+    environment:
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://demo-kafka:9092
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_NODE_ID=1
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@demo-kafka:9093
+      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_HEAP_OPTS=-Xmx400m -Xms400m
+    networks:
+      - velodb-otel
+    healthcheck:
+      test: nc -z demo-kafka 9092
+      start_period: 10s
+      interval: 5s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+    logging: *logging
+
+  demo-flagd:
+    image: ghcr.io/open-feature/flagd:v0.12.1
+    container_name: demo-flagd
+    profiles: ["demo"]
+    command: ["start", "--uri", "file:./etc/flagd/flags.json"]
+    configs:
+      - source: flagd-config
+        target: /etc/flagd/flags.json
+    networks:
+      - velodb-otel
+    restart: unless-stopped
+    logging: *logging
