@@ -1,0 +1,197 @@
+#
+# VeloDB Integration Lab - Complete Docker Compose
+#
+# Data Flow:
+#   PostgreSQL (all 5 tables) -> Flink CDC -> VeloDB Cloud -> Superset
+#
+# Services:
+#   - postgres: Source database with CDC enabled
+#   - flink-cdc: Flink cluster with CDC job (syncs to VeloDB)
+#   - datagen: Continuous data generator
+#   - superset: BI dashboard
+#   - kafka/zookeeper/kafka-connect: Optional alternative path
+#
+
+services:
+  # =============================================
+  # PostgreSQL - Source Database with CDC
+  # =============================================
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-labuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-labpass}
+      POSTGRES_DB: ${POSTGRES_DB:-user_analytics}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./datagen/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U labuser -d user_analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - lab_network
+
+  # =============================================
+  # Flink CDC - Syncs PostgreSQL to VeloDB
+  # =============================================
+  flink-cdc:
+    build:
+      context: ./flink
+      dockerfile: Dockerfile
+    container_name: flink-cdc
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8081:8081"  # Flink Web UI
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-labuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-labpass}
+      POSTGRES_DB: ${POSTGRES_DB:-user_analytics}
+      VELODB_FE_HOST: ${VELODB_FE_HOST:-localhost}
+      VELODB_HTTP_PORT: ${VELODB_HTTP_PORT:-8030}
+      VELODB_USER: ${VELODB_USER:-admin}
+      VELODB_PASSWORD: ${VELODB_PASSWORD:-}
+      VELODB_DATABASE: ${VELODB_DATABASE:-user_analytics}
+    command: ["/opt/flink/start-cdc-job.sh"]
+    networks:
+      - lab_network
+    restart: on-failure
+
+  # =============================================
+  # Data Generator - Continuous Events
+  # =============================================
+  datagen:
+    build:
+      context: ./datagen
+      dockerfile: Dockerfile
+    container_name: datagen
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-labuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-labpass}
+      POSTGRES_DB: ${POSTGRES_DB:-user_analytics}
+      EVENTS_PER_SECOND: ${EVENTS_PER_SECOND:-5}
+      CONVERSION_INTERVAL: ${CONVERSION_INTERVAL:-5}
+      NEW_USER_INTERVAL: ${NEW_USER_INTERVAL:-30}
+      KAFKA_ENABLED: "false"
+    networks:
+      - lab_network
+    command: ["python", "/app/continuous_datagen.py"]
+    restart: unless-stopped
+
+  # =============================================
+  # Apache Superset - BI Dashboard
+  # =============================================
+  superset:
+    image: apache/superset:3.1.0
+    container_name: superset
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-velodb_lab_secret_key_2024}
+      VELODB_HOST: ${VELODB_FE_HOST:-localhost}
+      VELODB_PORT: ${VELODB_QUERY_PORT:-9030}
+      VELODB_USER: ${VELODB_USER:-admin}
+      VELODB_PASSWORD: ${VELODB_PASSWORD:-}
+      VELODB_DATABASE: ${VELODB_DATABASE:-user_analytics}
+    volumes:
+      - superset_data:/app/superset_home
+    command: >
+      bash -c "
+        pip install -q pymysql &&
+        superset db upgrade &&
+        superset fab create-admin --username admin --firstname Admin --lastname User --email admin@lab.local --password admin || true &&
+        superset init &&
+        superset run -h 0.0.0.0 -p 8088 --with-threads
+      "
+    networks:
+      - lab_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # =============================================
+  # OPTIONAL: Kafka Stack (Alternative Path)
+  # Uncomment to enable Kafka streaming
+  # =============================================
+
+  # zookeeper:
+  #   image: confluentinc/cp-zookeeper:7.5.0
+  #   container_name: zookeeper
+  #   environment:
+  #     ZOOKEEPER_CLIENT_PORT: 2181
+  #     ZOOKEEPER_TICK_TIME: 2000
+  #   networks:
+  #     - lab_network
+
+  # kafka:
+  #   image: confluentinc/cp-kafka:7.5.0
+  #   container_name: kafka
+  #   depends_on:
+  #     - zookeeper
+  #   ports:
+  #     - "9092:9092"
+  #   environment:
+  #     KAFKA_BROKER_ID: 1
+  #     KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+  #     KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+  #     KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+  #     KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+  #     KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+  #   networks:
+  #     - lab_network
+
+  # kafka-connect:
+  #   image: confluentinc/cp-kafka-connect:7.5.0
+  #   container_name: kafka-connect
+  #   depends_on:
+  #     - kafka
+  #   ports:
+  #     - "8083:8083"
+  #   environment:
+  #     CONNECT_BOOTSTRAP_SERVERS: kafka:29092
+  #     CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+  #     CONNECT_REST_PORT: 8083
+  #     CONNECT_GROUP_ID: velodb-connect-group
+  #     CONNECT_CONFIG_STORAGE_TOPIC: velodb-connect-configs
+  #     CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+  #     CONNECT_OFFSET_STORAGE_TOPIC: velodb-connect-offsets
+  #     CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+  #     CONNECT_STATUS_STORAGE_TOPIC: velodb-connect-status
+  #     CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+  #     CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+  #     CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+  #     CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+  #     CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+  #   networks:
+  #     - lab_network
+
+volumes:
+  postgres_data:
+  superset_data:
+
+networks:
+  lab_network:
+    driver: bridge

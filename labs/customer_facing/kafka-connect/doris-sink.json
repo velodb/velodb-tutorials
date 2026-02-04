@@ -1,0 +1,23 @@
+{
+    "name": "velodb-user-events-sink",
+    "config": {
+        "connector.class": "org.apache.doris.kafka.connector.DorisSinkConnector",
+        "tasks.max": "1",
+        "topics": "user_events",
+        "doris.urls": "${VELODB_FE_HOST}",
+        "doris.http.port": "8030",
+        "doris.query.port": "9030",
+        "doris.user": "${VELODB_USER}",
+        "doris.password": "${VELODB_PASSWORD}",
+        "doris.database": "user_analytics",
+        "doris.table": "user_events",
+        "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+        "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+        "value.converter.schemas.enable": "false",
+        "buffer.count.records": "10000",
+        "buffer.flush.time": "60",
+        "buffer.size.bytes": "5000000",
+        "doris.request.connect.timeout.ms": "30000",
+        "doris.request.read.timeout.ms": "30000"
+    }
+}
