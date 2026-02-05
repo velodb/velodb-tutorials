@@ -107,6 +107,7 @@ PROPERTIES (
 
 -- Kafka events table (separate from Flink CDC to avoid duplicates)
 -- This demonstrates the Kafka Connect -> VeloDB path
+-- Note: merge-on-write must be disabled for Kafka Connect 2PC compatibility
 CREATE TABLE IF NOT EXISTS kafka_fact_events (
     event_id BIGINT,
     user_id BIGINT,
@@ -120,10 +121,10 @@ CREATE TABLE IF NOT EXISTS kafka_fact_events (
     properties VARCHAR(65533)
 )
 UNIQUE KEY(event_id)
-DISTRIBUTED BY HASH(user_id) BUCKETS 4
+DISTRIBUTED BY HASH(event_id) BUCKETS 4
 PROPERTIES (
     "replication_num" = "1",
-    "enable_unique_key_merge_on_write" = "true"
+    "enable_unique_key_merge_on_write" = "false"
 );
 
 -- =============================================

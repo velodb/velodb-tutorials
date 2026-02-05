@@ -40,8 +40,9 @@ echo "[Connector Registration] Kafka Connect is ready!"
 # Wait a bit more for full initialization
 sleep 10
 
-# Check if connector already exists
-if curl -s http://localhost:8083/connectors/velodb-kafka-events-sink 2>&1 | grep -q "velodb-kafka-events-sink"; then
+# Check if connector already exists by looking for it in the connector list
+CONNECTORS=$(curl -s http://localhost:8083/connectors)
+if echo "$CONNECTORS" | grep -q "velodb-kafka-events-sink"; then
     echo "[Connector Registration] Connector already exists, skipping"
 else
     echo "[Connector Registration] Registering Doris sink connector..."

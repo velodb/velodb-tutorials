@@ -10,13 +10,13 @@
         "doris.user": "${VELODB_USER}",
         "doris.password": "${VELODB_PASSWORD}",
         "doris.database": "${VELODB_DATABASE}",
-        "doris.table": "kafka_fact_events",
+        "doris.topic2table.map": "fact_events:kafka_fact_events",
         "key.converter": "org.apache.kafka.connect.storage.StringConverter",
         "value.converter": "org.apache.kafka.connect.json.JsonConverter",
         "value.converter.schemas.enable": "false",
-        "buffer.count.records": "10000",
-        "buffer.flush.time": "60",
-        "buffer.size.bytes": "5000000",
+        "buffer.count.records": "1000",
+        "buffer.flush.time": "10",
+        "buffer.size.bytes": "1000000",
         "doris.request.connect.timeout.ms": "30000",
         "doris.request.read.timeout.ms": "30000"
     }
