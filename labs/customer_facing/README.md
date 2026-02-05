@@ -161,6 +161,39 @@ mysql -h YOUR_HOST -P 9030 -u admin -p -e "
   SELECT 'kafka_fact_events (Kafka)' as source, COUNT(*) as count FROM user_analytics.kafka_fact_events;"
 ```
 
+## Troubleshooting
+
+### "Access denied for user 'admin@x.x.x.x'"
+Your IP is not whitelisted in VeloDB Cloud:
+1. Find your public IP: `curl -s ifconfig.me`
+2. Go to VeloDB Cloud Console → Cluster → Network Settings
+3. Add your IP to the whitelist (or use `0.0.0.0/0` for testing)
+
+### Kafka Connect task FAILED with "2pc unsupported for mow table"
+The `kafka_fact_events` table has `enable_unique_key_merge_on_write = true`. Recreate it:
+```sql
+DROP TABLE IF EXISTS kafka_fact_events;
+CREATE TABLE kafka_fact_events (...)
+PROPERTIES ("enable_unique_key_merge_on_write" = "false");
+```
+
+### Kafka Connect task FAILED with "table not found, tableName=null"
+The connector config uses wrong parameter. Use `doris.topic2table.map` instead of `doris.table`:
+```json
+"doris.topic2table.map": "fact_events:kafka_fact_events"
+```
+
+### Flink CDC jobs stuck in SCHEDULED state
+TaskManager needs more slots. Check `flink/start-cdc-job.sh` includes:
+```bash
+echo "taskmanager.numberOfTaskSlots: 10" >> /opt/flink/conf/flink-conf.yaml
+```
+
+### No data in VeloDB after starting
+1. Check Flink logs: `docker logs flink-cdc | grep -i "error\|success"`
+2. Verify VeloDB tables exist: Run `flink/velodb_schema.sql` first
+3. Check IP whitelist (see above)
+
 ## Documentation
 
 - **[Full Tutorial](./TUTORIAL.md)** - Complete hands-on guide

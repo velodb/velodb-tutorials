@@ -130,15 +130,32 @@ Access Points:
   • VeloDB Cloud:    Your configured endpoint (:9030 for queries, :8080 for HTTP)
 ```
 
-### Alternative: Kafka Streaming Path
+### Dual Data Paths (Both Enabled by Default)
 
-The lab also includes Kafka Connect configuration for streaming fact tables, demonstrating an alternative ingestion pattern:
+This lab demonstrates **two parallel ingestion paths** to VeloDB:
 
 ```
-PostgreSQL (dims) ──► Flink CDC ──────────────────┐
-                                                  ├──► VeloDB Cloud
-Kafka (facts) ──► Doris Kafka Connector ──────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        DOCKER COMPOSE                                        │
+│                                                                              │
+│   PATH 1: Flink CDC (Database Changes)                                       │
+│   ┌──────────┐    ┌──────────┐    ┌──────────┐                              │
+│   │ Datagen  │───►│PostgreSQL│───►│Flink CDC │──┐                           │
+│   └────┬─────┘    └──────────┘    └──────────┘  │                           │
+│        │                                         │  fact_events (CDC)        │
+│        │   PATH 2: Kafka Connect (Streaming)     │  fact_conversions (CDC)   │
+│        │   ┌──────────┐    ┌─────────────┐      │  dim_* tables (CDC)       │
+│        └──►│  Kafka   │───►│Kafka Connect│──────┤                           │
+│            └──────────┘    └─────────────┘      │  kafka_fact_events (Kafka)│
+│                                                  │                           │
+└──────────────────────────────────────────────────┼───────────────────────────┘
+                                                   ▼
+                                          ┌───────────────┐
+                                          │ VeloDB Cloud  │
+                                          └───────────────┘
 ```
+
+**Key Design Decision**: The Kafka path writes to a **separate table** (`kafka_fact_events`) to avoid duplicating data from the CDC path. This lets you compare both paths side-by-side.
 
 ### Data Model: 5-Table Star Schema
 
@@ -182,8 +199,10 @@ Kafka (facts) ──► Doris Kafka Connector ──────────┘
 
 | Source | Integration Method | Target Tables | Use Case |
 |--------|-------------------|---------------|----------|
-| PostgreSQL | Flink CDC | All 5 tables (dims + facts) | **Primary path**: Real-time CDC |
-| Kafka (optional) | Doris Kafka Connector | fact_events, fact_conversions | Alternative streaming path |
+| PostgreSQL | Flink CDC | dim_users, dim_features, dim_campaigns, fact_events, fact_conversions | **Primary path**: Real-time CDC with full CRUD support |
+| Kafka | Doris Kafka Connector | kafka_fact_events | **Streaming path**: High-throughput event ingestion |
+
+> **Note**: Both paths run simultaneously. The datagen service writes to both PostgreSQL and Kafka, demonstrating dual-path ingestion without data duplication.
 
 ---
 
@@ -649,36 +668,27 @@ SELECT * FROM dim_campaigns WHERE campaign_id = 5;
 
 ## 5. Module 2: Kafka Integration
 
-This module demonstrates streaming **fact tables** from Kafka to VeloDB using the Doris Kafka Connector.
+This module demonstrates streaming events from Kafka to VeloDB using the Doris Kafka Connector. The datagen service automatically sends events to both PostgreSQL and Kafka, allowing you to see both paths working in parallel.
 
-### 5.1 Create Kafka Topics
+### 5.1 Kafka Services (Auto-Started)
 
-```bash
-# Create fact_events topic (user behavior events)
-docker exec -it kafka kafka-topics --create \
-    --bootstrap-server localhost:9092 \
-    --topic fact_events \
-    --partitions 3 \
-    --replication-factor 1
+When you run `docker compose up`, these Kafka services start automatically:
+- **Zookeeper** - Kafka coordination
+- **Kafka** - Message broker (port 9092)
+- **Kafka Connect** - Doris sink connector (port 8083)
 
-# Create fact_conversions topic (revenue events)
-docker exec -it kafka kafka-topics --create \
-    --bootstrap-server localhost:9092 \
-    --topic fact_conversions \
-    --partitions 3 \
-    --replication-factor 1
+Topics are auto-created by Kafka when datagen starts producing messages.
 
-# Verify topics
-docker exec -it kafka kafka-topics --list --bootstrap-server localhost:9092
-```
+### 5.2 Create Kafka Target Table in VeloDB
 
-### 5.2 Create Target Tables in VeloDB
+The Kafka path writes to a **separate table** to avoid duplicating CDC data:
 
 ```sql
 USE user_analytics;
 
--- Fact Events table (high-volume user behavior events)
-CREATE TABLE IF NOT EXISTS fact_events (
+-- Kafka events table (separate from Flink CDC to avoid duplicates)
+-- IMPORTANT: merge-on-write must be DISABLED for Kafka Connect 2PC compatibility
+CREATE TABLE IF NOT EXISTS kafka_fact_events (
     event_id BIGINT,
     user_id BIGINT,
     feature_id BIGINT,
@@ -690,132 +700,88 @@ CREATE TABLE IF NOT EXISTS fact_events (
     search_query VARCHAR(200),
     properties VARCHAR(65533)
 )
-DUPLICATE KEY(event_id, user_id, feature_id)
-DISTRIBUTED BY HASH(user_id) BUCKETS 4
+UNIQUE KEY(event_id)
+DISTRIBUTED BY HASH(event_id) BUCKETS 4
 PROPERTIES (
-    "replication_num" = "1"
+    "replication_num" = "1",
+    "enable_unique_key_merge_on_write" = "false"  -- Required for Kafka Connect!
 );
 
--- Fact Conversions table (revenue-generating events)
-CREATE TABLE IF NOT EXISTS fact_conversions (
-    conversion_id BIGINT,
-    user_id BIGINT,
-    feature_id BIGINT,
-    campaign_id BIGINT,
-    conversion_type VARCHAR(50),
-    conversion_time DATETIME,
-    plan_from VARCHAR(20),
-    plan_to VARCHAR(20),
-    revenue DECIMAL(10,2),
-    properties VARCHAR(65533)
-)
-DUPLICATE KEY(conversion_id, user_id, feature_id)
-DISTRIBUTED BY HASH(user_id) BUCKETS 4
-PROPERTIES (
-    "replication_num" = "1"
-);
-
--- Create indexes for better query performance
-CREATE INDEX idx_event_type ON fact_events(event_type) USING INVERTED;
-CREATE INDEX idx_event_time ON fact_events(event_time) USING INVERTED;
-CREATE INDEX idx_conversion_type ON fact_conversions(conversion_type) USING INVERTED;
-CREATE INDEX idx_conversion_time ON fact_conversions(conversion_time) USING INVERTED;
-
--- Verify all tables (dimensions + facts)
-SHOW TABLES;
+-- Verify table created
+SHOW CREATE TABLE kafka_fact_events;
 ```
 
-### 5.3 Download Doris Kafka Connector
+> **⚠️ Critical**: The `enable_unique_key_merge_on_write` must be `false` for Kafka Connect. The Doris Kafka Connector uses 2-phase commit which is incompatible with merge-on-write tables.
 
+### 5.3 Kafka Connect (Pre-Configured)
+
+The Doris Kafka Connector is pre-installed in the `kafka-connect` Docker image. It auto-registers on startup using environment variables from your `.env` file.
+
+**Verify Kafka Connect is ready:**
 ```bash
-# Download the connector JAR
-mkdir -p kafka-connect-plugins
-cd kafka-connect-plugins
-
-curl -O https://repo1.maven.org/maven2/org/apache/doris/doris-kafka-connector/25.0.0/doris-kafka-connector-25.0.0.jar
-
-# Copy to Kafka Connect container
-docker cp doris-kafka-connector-25.0.0.jar kafka-connect:/usr/share/java/
-
-# Restart Kafka Connect to load the plugin
-docker restart kafka-connect
-sleep 30
+curl -s http://localhost:8083/ | python3 -m json.tool
 ```
 
-### 5.4 Deploy Kafka Connectors
-
-**Check Kafka Connect is ready:**
+**Check if connector is registered:**
 ```bash
-curl -s http://localhost:8083/ | jq .
+curl -s http://localhost:8083/connectors
+# Expected: ["velodb-kafka-events-sink"]
 ```
 
-**Deploy Fact Events Connector:**
+### 5.4 Manual Connector Registration (If Needed)
+
+If the connector didn't auto-register, deploy it manually:
 
 ```bash
-# Replace with your VeloDB credentials
+# Replace placeholders with your VeloDB credentials
 curl -X POST http://localhost:8083/connectors \
     -H "Content-Type: application/json" \
     -d '{
-    "name": "velodb-fact-events-sink",
+    "name": "velodb-kafka-events-sink",
     "config": {
         "connector.class": "org.apache.doris.kafka.connector.DorisSinkConnector",
         "tasks.max": "1",
         "topics": "fact_events",
         "doris.urls": "YOUR_VELODB_HOST",
-        "doris.http.port": "8030",
+        "doris.http.port": "8080",
         "doris.query.port": "9030",
         "doris.user": "YOUR_USER",
         "doris.password": "YOUR_PASSWORD",
         "doris.database": "user_analytics",
-        "doris.table": "fact_events",
+        "doris.topic2table.map": "fact_events:kafka_fact_events",
         "key.converter": "org.apache.kafka.connect.storage.StringConverter",
         "value.converter": "org.apache.kafka.connect.json.JsonConverter",
         "value.converter.schemas.enable": "false",
-        "buffer.count.records": "10000",
-        "buffer.flush.time": "60"
+        "buffer.count.records": "1000",
+        "buffer.flush.time": "10",
+        "buffer.size.bytes": "1000000",
+        "doris.request.connect.timeout.ms": "30000",
+        "doris.request.read.timeout.ms": "30000"
     }
 }'
 ```
 
-**Deploy Fact Conversions Connector:**
-
-```bash
-curl -X POST http://localhost:8083/connectors \
-    -H "Content-Type: application/json" \
-    -d '{
-    "name": "velodb-fact-conversions-sink",
-    "config": {
-        "connector.class": "org.apache.doris.kafka.connector.DorisSinkConnector",
-        "tasks.max": "1",
-        "topics": "fact_conversions",
-        "doris.urls": "YOUR_VELODB_HOST",
-        "doris.http.port": "8030",
-        "doris.query.port": "9030",
-        "doris.user": "YOUR_USER",
-        "doris.password": "YOUR_PASSWORD",
-        "doris.database": "user_analytics",
-        "doris.table": "fact_conversions",
-        "key.converter": "org.apache.kafka.connect.storage.StringConverter",
-        "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-        "value.converter.schemas.enable": "false",
-        "buffer.count.records": "5000",
-        "buffer.flush.time": "30"
-    }
-}'
-```
+> **Important Configuration Notes:**
+> - Use `doris.topic2table.map` instead of `doris.table` to map topics to tables
+> - Format: `"topic_name:table_name"` (e.g., `"fact_events:kafka_fact_events"`)
+> - `buffer.flush.time`: Lower values (10s) give faster feedback during demos
+> - `doris.http.port`: Usually `8080` for VeloDB Cloud
 
 **Verify Connector Status:**
 
 ```bash
-# List connectors
-curl -s http://localhost:8083/connectors | jq .
-
-# Check status
-curl -s http://localhost:8083/connectors/velodb-fact-events-sink/status | jq .
-curl -s http://localhost:8083/connectors/velodb-fact-conversions-sink/status | jq .
+# Check connector status
+curl -s http://localhost:8083/connectors/velodb-kafka-events-sink/status | python3 -m json.tool
 ```
 
-Both should show `"state": "RUNNING"`
+Expected output:
+```json
+{
+    "name": "velodb-kafka-events-sink",
+    "connector": { "state": "RUNNING" },
+    "tasks": [{ "id": 0, "state": "RUNNING" }]
+}
+```
 
 ### 5.5 Produce Test Messages
 
@@ -1183,19 +1149,27 @@ for job in json.load(sys.stdin)['jobs']:
 curl -s http://localhost:8088/health
 ```
 
-### 7.2 Verify Data Counts
+### 7.2 Verify Data Counts (Both Paths)
 
 In VeloDB SQL Editor:
 
 ```sql
 USE user_analytics;
 
-SELECT 'dim_users' as table_name, COUNT(*) as rows FROM dim_users
-UNION ALL SELECT 'dim_features', COUNT(*) FROM dim_features
-UNION ALL SELECT 'dim_campaigns', COUNT(*) FROM dim_campaigns
-UNION ALL SELECT 'fact_events', COUNT(*) FROM fact_events
-UNION ALL SELECT 'fact_conversions', COUNT(*) FROM fact_conversions;
+-- Check all tables including Kafka path
+SELECT 'PATH 1: Flink CDC' as source, '' as table_name, '' as rows
+UNION ALL SELECT '', 'dim_users', CAST(COUNT(*) AS CHAR) FROM dim_users
+UNION ALL SELECT '', 'dim_features', CAST(COUNT(*) AS CHAR) FROM dim_features
+UNION ALL SELECT '', 'dim_campaigns', CAST(COUNT(*) AS CHAR) FROM dim_campaigns
+UNION ALL SELECT '', 'fact_events', CAST(COUNT(*) AS CHAR) FROM fact_events
+UNION ALL SELECT '', 'fact_conversions', CAST(COUNT(*) AS CHAR) FROM fact_conversions
+UNION ALL SELECT 'PATH 2: Kafka Connect', '', ''
+UNION ALL SELECT '', 'kafka_fact_events', CAST(COUNT(*) AS CHAR) FROM kafka_fact_events;
 ```
+
+**Expected Results:**
+- CDC tables should have growing counts (dim_users ~10+, fact_events ~1000s)
+- kafka_fact_events should also be growing (synced from Kafka)
 
 ### 7.3 Verify Real-Time Sync
 
@@ -1249,18 +1223,47 @@ docker exec -it postgres psql -U labuser -c "SHOW wal_level;"
 **Connector in FAILED state:**
 ```bash
 # Check error details
-curl -s http://localhost:8083/connectors/velodb-user-events-sink/status | jq '.tasks[0].trace'
+curl -s http://localhost:8083/connectors/velodb-kafka-events-sink/status | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+if data.get('tasks'):
+    print(data['tasks'][0].get('trace', 'No trace')[:500])"
 ```
 
-**Restart connector:**
+**Common Error: "stream load 2pc is unsupported for mow table"**
+
+This error occurs when the target table has `enable_unique_key_merge_on_write = true`. Fix:
+```sql
+-- Recreate table without merge-on-write
+DROP TABLE IF EXISTS kafka_fact_events;
+CREATE TABLE kafka_fact_events (
+    -- ... columns ...
+) UNIQUE KEY(event_id)
+DISTRIBUTED BY HASH(event_id) BUCKETS 4
+PROPERTIES (
+    "replication_num" = "1",
+    "enable_unique_key_merge_on_write" = "false"  -- Must be false!
+);
+```
+
+**Common Error: "table not found, tableName=null"**
+
+This error means the connector config is using `doris.table` instead of `doris.topic2table.map`. Fix:
+```json
+{
+    "doris.topic2table.map": "fact_events:kafka_fact_events"
+}
+```
+
+**Restart connector task:**
 ```bash
-curl -X POST http://localhost:8083/connectors/velodb-user-events-sink/restart
+curl -X POST http://localhost:8083/connectors/velodb-kafka-events-sink/tasks/0/restart
 ```
 
 **Delete and recreate connector:**
 ```bash
-curl -X DELETE http://localhost:8083/connectors/velodb-user-events-sink
-# Then redeploy
+curl -X DELETE http://localhost:8083/connectors/velodb-kafka-events-sink
+# Then redeploy with correct config
 ```
 
 ### VeloDB Connection Issues
