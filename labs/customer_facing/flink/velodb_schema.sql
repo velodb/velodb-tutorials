@@ -102,6 +102,31 @@ PROPERTIES (
 );
 
 -- =============================================
+-- KAFKA SINK TABLE (for Kafka -> VeloDB path)
+-- =============================================
+
+-- Kafka events table (separate from Flink CDC to avoid duplicates)
+-- This demonstrates the Kafka Connect -> VeloDB path
+CREATE TABLE IF NOT EXISTS kafka_fact_events (
+    event_id BIGINT,
+    user_id BIGINT,
+    feature_id BIGINT,
+    campaign_id BIGINT,
+    session_id VARCHAR(50),
+    event_type VARCHAR(50),
+    event_time DATETIME,
+    page_url VARCHAR(500),
+    search_query VARCHAR(200),
+    properties VARCHAR(65533)
+)
+UNIQUE KEY(event_id)
+DISTRIBUTED BY HASH(user_id) BUCKETS 4
+PROPERTIES (
+    "replication_num" = "1",
+    "enable_unique_key_merge_on_write" = "true"
+);
+
+-- =============================================
 -- INDEXES
 -- =============================================
 

@@ -1,9 +1,9 @@
 #
 # VeloDB Integration Lab - Complete Docker Compose
 #
-# Data Flow (Two Paths):
-#   Path 1: PostgreSQL (all 5 tables) -> Flink CDC -> VeloDB Cloud
-#   Path 2: Kafka (events) -> Kafka Connect (Doris Sink) -> VeloDB Cloud
+# Data Flow (Two Paths - No Duplicates):
+#   Path 1: PostgreSQL (all 5 tables) -> Flink CDC -> VeloDB Cloud (fact_events table)
+#   Path 2: Kafka (fact_events topic) -> Kafka Connect -> VeloDB Cloud (kafka_fact_events table)
 #
 # Services:
 #   - postgres: Source database with CDC enabled
@@ -100,7 +100,6 @@ services:
       NEW_USER_INTERVAL: ${NEW_USER_INTERVAL:-30}
       KAFKA_ENABLED: "true"
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      KAFKA_TOPIC_EVENTS: user_events
     networks:
       - lab_network
     command: ["python", "/app/continuous_datagen.py"]
@@ -211,7 +210,7 @@ services:
       CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
       CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components,/opt/connectors
       VELODB_FE_HOST: ${VELODB_FE_HOST:-localhost}
-      VELODB_HTTP_PORT: ${VELODB_HTTP_PORT:-8080}
+      VELODB_HTTP_PORT: ${VELODB_HTTP_PORT:-8030}
       VELODB_USER: ${VELODB_USER:-admin}
       VELODB_PASSWORD: ${VELODB_PASSWORD:-}
       VELODB_DATABASE: ${VELODB_DATABASE:-user_analytics}
