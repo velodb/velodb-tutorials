@@ -148,3 +148,9 @@ DESC dim_features;
 DESC dim_campaigns;
 DESC fact_events;
 DESC fact_conversions;
+DESC kafka_fact_events;
+
+-- Verify kafka_fact_events has merge-on-write DISABLED
+-- This is critical for Kafka Connect compatibility
+SHOW CREATE TABLE kafka_fact_events;
+-- Look for: "enable_unique_key_merge_on_write" = "false"
